@@ -2,7 +2,9 @@ import { Command, Helper, OptionsHelper } from '@dojo/interfaces/cli';
 import { underline } from 'chalk';
 import * as path from 'path';
 import runTests from './runTests';
+import { debounce } from '@dojo/core/util';
 
+const chokidar = require('chokidar');
 const pkgDir = require('pkg-dir');
 
 const CLI_BUILD_PACKAGE = '@dojo/cli-build-webpack';
@@ -21,6 +23,7 @@ export interface TestArgs {
 	unit: boolean;
 	verbose: boolean;
 	internConfig: string;
+	watch?: boolean;
 }
 
 function buildNpmDependencies(): any {
@@ -110,6 +113,12 @@ const command: Command<TestArgs> = {
 			describe: 'Produce diagnostic messages to the console.',
 			default: false
 		});
+
+		options('w', {
+			alias: 'watch',
+			describe: '',
+			default: false
+		});
 	},
 	run(helper: Helper, args: TestArgs) {
 		function unhandledRejection(reason: any) {
@@ -123,25 +132,37 @@ const command: Command<TestArgs> = {
 			if (!helper.command.exists('build')) {
 				reject(Error(`Required command: 'build', does not exist. Have you run 'npm install ${CLI_BUILD_PACKAGE}'?`));
 			}
-			try {
-				const projectName = require(path.join(process.cwd(), './package.json')).name;
-				console.log('\n' + underline(`building "${projectName}"...`));
+			const result = helper.command.run('build', '', { test: true, watch: args.watch, quiet: true } as any);
+			let initialRun = true;
+			if (args.watch) {
+				function getDebounced(time: number) {
+					return debounce(function () {
+						process.stdout.write('\x1Bc');
+						runTests(args);
+						initialRun = false;
+					}, time);
+				}
+
+				const initial = getDebounced(5000);
+				const rest = getDebounced(1000);
+
+				chokidar.watch('./output/test', { ignored: /(^|[\/\\])\../ }).on('all', () => {
+					initialRun ? initial() : rest();
+				});
 			}
-			catch (e) {
-				console.log('\n' + underline(`building project...`));
+			else {
+				result.then(
+					() => {
+						runTests(args)
+							.then(() => {
+								console.log('\n to run in browser: ' + underline('./node_modules/intern/client.html?config=node_modules/@dojo/cli-test-intern/intern/intern'));
+								process.removeListener('unhandledRejection', unhandledRejection);
+							})
+							.then(resolve, reject);
+					},
+					reject
+				);
 			}
-			const result = helper.command.run('build', '', <any> { withTests: true, disableLazyWidgetDetection: true });
-			result.then(
-				() => {
-					runTests(args)
-						.then(() => {
-							console.log('\n to run in browser: ' + underline('./node_modules/intern/client.html?config=node_modules/@dojo/cli-test-intern/intern/intern'));
-							process.removeListener('unhandledRejection', unhandledRejection);
-						})
-						.then(resolve, reject);
-				},
-				reject
-			);
 		});
 	},
 	eject(helper: Helper) {
